@@ -6,6 +6,7 @@ import {
   RefreshCw, AlertCircle, MessageSquare, Home
 } from 'lucide-react';
 import { SYMBOLS, COLORS, checkWin } from './utils/gameHelpers';
+import { Analytics } from '@vercel/analytics/react';
 import './App.css';
 
 // Socket type definition matching the server structures
@@ -1100,6 +1101,9 @@ function App() {
           </div>
         ))}
       </div>
+
+      {/* Vercel Web Analytics */}
+      <Analytics />
     </>
   );
 }
