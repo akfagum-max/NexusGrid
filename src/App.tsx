@@ -11,11 +11,13 @@ import './App.css';
 // Socket type definition matching the server structures
 interface Player {
   id: string;
+  socketId: string;
   name: string;
   symbol: string;
   color: string;
   isReady: boolean;
   isHost: boolean;
+  isOffline: boolean;
 }
 
 interface ChatMessage {
@@ -49,17 +51,20 @@ function App() {
   const [mode, setMode] = useState<'local' | 'online' | null>(null);
   
   // User Inputs
-  const [playerName, setPlayerName] = useState('');
+  const [playerName, setPlayerName] = useState(() => localStorage.getItem('nexus_player_name') || '');
   const [maxPlayers, setMaxPlayers] = useState(3); // Default 3 players -> 4x4 grid
   const [joinRoomId, setJoinRoomId] = useState('');
   const [chatInput, setChatInput] = useState('');
+  
+  // Persistence State
+  const [savedRoomId, setSavedRoomId] = useState<string | null>(() => localStorage.getItem('nexus_room_id') || null);
   
   // Online State
   const [roomState, setRoomState] = useState<Room | null>(null);
   const socketRef = useRef<Socket | null>(null);
   
   // Local Pass & Play State
-  const [localPlayers, setLocalPlayers] = useState<Omit<Player, 'isReady' | 'isHost'>[]>([]);
+  const [localPlayers, setLocalPlayers] = useState<Omit<Player, 'isReady' | 'isHost' | 'socketId'>[]>([]);
   const [localBoard, setLocalBoard] = useState<(string | null)[]>([]);
   const [localTurnIndex, setLocalTurnIndex] = useState(0);
   const [localWinner, setLocalWinner] = useState<string | 'draw' | null>(null); // name or 'draw'
@@ -155,6 +160,15 @@ function App() {
 
       const socket = socketRef.current;
 
+      // Automatically attempt reconnect on socket connection if stored credentials match
+      socket.on('connect', () => {
+        const savedPlayerId = localStorage.getItem('nexus_player_id');
+        const savedRId = localStorage.getItem('nexus_room_id');
+        if (savedPlayerId && savedRId) {
+          socket.emit('reconnect-player', { playerId: savedPlayerId, roomId: savedRId });
+        }
+      });
+
       socket.on('connect_error', () => {
         addToast('Connection error. Is the server running?', 'error');
         setMode(null);
@@ -165,16 +179,47 @@ function App() {
         addToast(msg, 'error');
       });
 
-      socket.on('room-created', (room: Room) => {
+      socket.on('room-created', ({ room, playerId }: { room: Room, playerId: string }) => {
         setRoomState(room);
         setView('lobby');
+        playAudio('join');
+        localStorage.setItem('nexus_player_id', playerId);
+        localStorage.setItem('nexus_room_id', room.id);
+        localStorage.setItem('nexus_player_name', playerName);
+        setSavedRoomId(room.id);
+      });
+
+      socket.on('room-joined', ({ room, playerId }: { room: Room, playerId: string }) => {
+        setRoomState(room);
+        setView('lobby');
+        playAudio('join');
+        localStorage.setItem('nexus_player_id', playerId);
+        localStorage.setItem('nexus_room_id', room.id);
+        localStorage.setItem('nexus_player_name', playerName);
+        setSavedRoomId(room.id);
+      });
+
+      socket.on('room-reconnected', (room: Room) => {
+        setRoomState(room);
+        if (room.status === 'playing') {
+          setView('playing');
+        } else if (room.status === 'ended') {
+          setView('ended');
+        } else {
+          setView('lobby');
+        }
+        addToast('Reconnected to session!');
         playAudio('join');
       });
 
-      socket.on('room-joined', (room: Room) => {
-        setRoomState(room);
-        setView('lobby');
-        playAudio('join');
+      socket.on('reconnect-failed', (msg: string) => {
+        addToast(msg, 'error');
+        localStorage.removeItem('nexus_room_id');
+        localStorage.removeItem('nexus_player_id');
+        setSavedRoomId(null);
+        setRoomState(null);
+        setMode(null);
+        setView('welcome');
       });
 
       socket.on('room-update', (room: Room) => {
@@ -230,7 +275,6 @@ function App() {
     }
     playAudio('click');
     setMode('online');
-    // Connection will trigger. Wait briefly to let connection establish, then emit
     setTimeout(() => {
       if (socketRef.current) {
         socketRef.current.emit('create-room', { 
@@ -280,8 +324,9 @@ function App() {
   const handleOnlineMove = (cellIndex: number) => {
     if (!roomState || roomState.status !== 'playing') return;
     
-    // Check if it's my turn
-    const me = roomState.players.find(p => p.id === socketRef.current?.id);
+    // Check if it's my turn using persistent ID
+    const myPersistentId = localStorage.getItem('nexus_player_id');
+    const me = roomState.players.find(p => p.id === myPersistentId);
     const activePlayer = roomState.players[roomState.turnIndex];
     
     if (!me || me.id !== activePlayer.id) {
@@ -319,9 +364,25 @@ function App() {
     if (socketRef.current) {
       socketRef.current.emit('leave-room');
     }
+    localStorage.removeItem('nexus_room_id');
+    localStorage.removeItem('nexus_player_id');
+    setSavedRoomId(null);
     setRoomState(null);
     setMode(null);
     setView('welcome');
+  };
+
+  // Auto Reconnection triggers
+  const handleAutoReconnect = () => {
+    playAudio('click');
+    setMode('online');
+  };
+
+  const handleClearSession = () => {
+    playAudio('click');
+    localStorage.removeItem('nexus_room_id');
+    localStorage.removeItem('nexus_player_id');
+    setSavedRoomId(null);
   };
 
   // --- LOCAL GAME (PASS & PLAY) ACTIONS ---
@@ -339,7 +400,8 @@ function App() {
         id: `local-p${i}`,
         name: customNameInput?.trim() || `Player ${i + 1}`,
         symbol: SYMBOLS[i],
-        color: COLORS[i]
+        color: COLORS[i],
+        isOffline: false
       });
     }
 
@@ -421,6 +483,34 @@ function App() {
           <div className="welcome-logo floating-icon">🌌</div>
           <h1>NEXUS GRID</h1>
           <p className="welcome-subtitle">Dynamic Multi-Player Tic-Tac-Toe</p>
+
+          {/* Persistent Reconnection card */}
+          {savedRoomId && (
+            <div style={{ border: '1px solid var(--neon-blue)', background: 'rgba(0, 240, 255, 0.04)', borderRadius: '12px', padding: '16px', marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '10px', textAlign: 'left', animation: 'popIn 0.3s ease' }}>
+              <div style={{ fontWeight: 600, fontSize: '0.95rem', color: '#fff' }}>Active Session Found</div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>You have an active session in Room <strong>{savedRoomId}</strong>.</p>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button 
+                  id="btn-reconnect-session"
+                  type="button" 
+                  className="btn btn-neon-blue" 
+                  style={{ flex: 1, padding: '8px 14px', fontSize: '0.85rem', borderRadius: '8px' }} 
+                  onClick={handleAutoReconnect}
+                >
+                  Reconnect
+                </button>
+                <button 
+                  id="btn-discard-session"
+                  type="button" 
+                  className="btn btn-outline" 
+                  style={{ padding: '8px 14px', fontSize: '0.85rem', borderRadius: '8px' }} 
+                  onClick={handleClearSession}
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
 
           <form onSubmit={(e) => e.preventDefault()} id="welcome-form">
             <div className="input-group">
@@ -657,7 +747,8 @@ function App() {
               
               {/* Render joined players */}
               {roomState.players.map((player) => {
-                const isMe = player.id === socketRef.current?.id;
+                const myPersistentId = localStorage.getItem('nexus_player_id');
+                const isMe = player.id === myPersistentId;
                 return (
                   <div key={player.id} className={`player-card ${isMe ? 'active-card' : ''}`}>
                     <div className="player-info">
@@ -674,7 +765,9 @@ function App() {
                     </div>
 
                     <div>
-                      {player.isHost ? (
+                      {player.isOffline ? (
+                        <span className="player-status-badge status-offline" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.25)' }}>Offline</span>
+                      ) : player.isHost ? (
                         <span className="player-status-badge status-host">Host</span>
                       ) : (
                         <span className={`player-status-badge ${player.isReady ? 'status-ready' : 'status-waiting'}`}>
@@ -708,7 +801,7 @@ function App() {
                 <LogOut size={18} /> Leave
               </button>
 
-              {roomState.players.find(p => p.id === socketRef.current?.id)?.isHost ? (
+              {roomState.players.find(p => p.id === localStorage.getItem('nexus_player_id'))?.isHost ? (
                 <button 
                   id="btn-start-online"
                   className={`btn btn-primary ${
@@ -730,7 +823,7 @@ function App() {
                   className="btn btn-neon-blue" 
                   onClick={handleToggleReady}
                 >
-                  {roomState.players.find(p => p.id === socketRef.current?.id)?.isReady ? 'Not Ready' : 'Ready Up'}
+                  {roomState.players.find(p => p.id === localStorage.getItem('nexus_player_id'))?.isReady ? 'Not Ready' : 'Ready Up'}
                 </button>
               )}
             </div>
@@ -947,7 +1040,7 @@ function App() {
                         >
                           <LogOut size={18} /> Leave
                         </button>
-                        {roomState.players.find(p => p.id === socketRef.current?.id)?.isHost ? (
+                        {roomState.players.find(p => p.id === localStorage.getItem('nexus_player_id'))?.isHost ? (
                           <button 
                             id="btn-online-rematch"
                             className="btn btn-primary" 
@@ -1008,7 +1101,9 @@ function App() {
                         </span>
                       </div>
                       
-                      {isCurrentTurn && (
+                      {player.isOffline ? (
+                        <span style={{ fontSize: '0.75rem', fontWeight: 600, color: '#ef4444' }}>Offline</span>
+                      ) : isCurrentTurn && (
                         <span 
                           style={{ 
                             fontSize: '0.75rem', 

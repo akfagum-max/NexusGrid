@@ -118,7 +118,6 @@ function checkWin(board, size, symbol) {
 
 io.on('connection', (socket) => {
   let currentRoomId = null;
-  let playerIndex = -1;
 
   // 1. Create Room
   socket.on('create-room', ({ playerName, maxPlayers }) => {
@@ -135,12 +134,14 @@ io.on('connection', (socket) => {
       gridSize: numPlayers + 1,
       players: [
         {
-          id: socket.id,
+          id: socket.id, // Persistent player session ID
+          socketId: socket.id, // Active socket connection ID
           name: playerName,
           symbol: SYMBOLS[0],
           color: COLORS[0],
           isReady: false,
-          isHost: true
+          isHost: true,
+          isOffline: false
         }
       ],
       board: Array((numPlayers + 1) * (numPlayers + 1)).fill(null),
@@ -153,10 +154,9 @@ io.on('connection', (socket) => {
 
     rooms.set(roomId, newRoom);
     currentRoomId = roomId;
-    playerIndex = 0;
 
     socket.join(roomId);
-    socket.emit('room-created', newRoom);
+    socket.emit('room-created', { room: newRoom, playerId: socket.id });
     io.to(roomId).emit('room-update', newRoom);
     console.log(`Room created: ${roomId} by player: ${playerName}`);
   });
@@ -183,20 +183,21 @@ io.on('connection', (socket) => {
 
     const nextIndex = room.players.length;
     const newPlayer = {
-      id: socket.id,
+      id: socket.id, // Persistent player session ID
+      socketId: socket.id, // Active socket connection ID
       name: playerName,
       symbol: SYMBOLS[nextIndex],
       color: COLORS[nextIndex],
       isReady: false,
-      isHost: false
+      isHost: false,
+      isOffline: false
     };
 
     room.players.push(newPlayer);
     currentRoomId = rId;
-    playerIndex = nextIndex;
 
     socket.join(rId);
-    socket.emit('room-joined', room);
+    socket.emit('room-joined', { room, playerId: socket.id });
     io.to(rId).emit('room-update', room);
     
     // System message in chat
@@ -211,13 +212,57 @@ io.on('connection', (socket) => {
     console.log(`Player ${playerName} joined room: ${rId}`);
   });
 
+  // Reconnect Player
+  socket.on('reconnect-player', ({ playerId, roomId }) => {
+    if (!playerId || !roomId) return;
+    const rId = roomId.trim().toUpperCase();
+    const room = rooms.get(rId);
+
+    if (!room) {
+      socket.emit('reconnect-failed', 'Room no longer exists.');
+      return;
+    }
+
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) {
+      socket.emit('reconnect-failed', 'Player not found in this room.');
+      return;
+    }
+
+    // Cancel active reconnection timer
+    if (player.reconnectTimer) {
+      clearTimeout(player.reconnectTimer);
+      delete player.reconnectTimer;
+    }
+
+    // Update active connection info
+    player.socketId = socket.id;
+    player.isOffline = false;
+    currentRoomId = rId;
+
+    socket.join(rId);
+    socket.emit('room-reconnected', room);
+    io.to(rId).emit('room-update', room);
+
+    // Chat system announcement
+    const sysMsg = {
+      sender: 'System',
+      text: `⚡ ${player.name} has reconnected!`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    room.chat.push(sysMsg);
+    io.to(rId).emit('chat-update', room.chat);
+
+    console.log(`Player ${player.name} reconnected successfully to room: ${rId}`);
+  });
+
   // 3. Toggle Ready Status
   socket.on('toggle-ready', () => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    const player = room.players.find(p => p.id === socket.id);
+    const player = room.players.find(p => p.socketId === socket.id);
     if (player) {
       player.isReady = !player.isReady;
       io.to(currentRoomId).emit('room-update', room);
@@ -231,7 +276,7 @@ io.on('connection', (socket) => {
     if (!room) return;
 
     // Only host can start
-    const player = room.players.find(p => p.id === socket.id);
+    const player = room.players.find(p => p.socketId === socket.id);
     if (!player || !player.isHost) {
       socket.emit('error-msg', 'Only the host can start the game.');
       return;
@@ -243,7 +288,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Check if everyone is ready (except host, or including host - let's say all other players must be ready)
+    // Check if everyone is ready (except host)
     const nonHostPlayers = room.players.filter(p => !p.isHost);
     const allReady = nonHostPlayers.every(p => p.isReady);
     if (!allReady) {
@@ -284,7 +329,7 @@ io.on('connection', (socket) => {
 
     // Check if it's this player's turn
     const activePlayer = room.players[room.turnIndex];
-    if (!activePlayer || activePlayer.id !== socket.id) {
+    if (!activePlayer || activePlayer.socketId !== socket.id) {
       socket.emit('error-msg', "It's not your turn!");
       return;
     }
@@ -342,7 +387,7 @@ io.on('connection', (socket) => {
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    const player = room.players.find(p => p.id === socket.id);
+    const player = room.players.find(p => p.socketId === socket.id);
     if (!player) return;
 
     const chatMsg = {
@@ -352,7 +397,7 @@ io.on('connection', (socket) => {
     };
 
     room.chat.push(chatMsg);
-    // Keep chat history bounded (e.g. last 100 messages)
+    // Keep chat history bounded
     if (room.chat.length > 100) {
       room.chat.shift();
     }
@@ -367,7 +412,7 @@ io.on('connection', (socket) => {
     if (!room || room.status !== 'ended') return;
 
     // Only host can restart
-    const player = room.players.find(p => p.id === socket.id);
+    const player = room.players.find(p => p.socketId === socket.id);
     if (!player || !player.isHost) {
       socket.emit('error-msg', 'Only the host can restart the game.');
       return;
@@ -393,81 +438,117 @@ io.on('connection', (socket) => {
     console.log(`Game restarted in room: ${currentRoomId}`);
   });
 
-  // 8. Leave Room / Disconnect
-  const handleLeave = () => {
+  // Explicit leave
+  const handleExplicitLeave = () => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    const leavingIdx = room.players.findIndex(p => p.id === socket.id);
+    const leavingIdx = room.players.findIndex(p => p.socketId === socket.id);
     if (leavingIdx === -1) return;
 
     const leavingPlayer = room.players[leavingIdx];
-    room.players.splice(leavingIdx, 1);
-
-    socket.leave(currentRoomId);
     
-    console.log(`Player ${leavingPlayer.name} left room: ${currentRoomId}`);
-
-    if (room.players.length === 0) {
-      // Room is empty, delete it
-      rooms.delete(currentRoomId);
-      console.log(`Room deleted (empty): ${currentRoomId}`);
-    } else {
-      // If host left, designate a new host
-      if (leavingPlayer.isHost) {
-        room.players[0].isHost = true;
-        // Keep their ready status false or sync
-        const sysMsg = {
-          sender: 'System',
-          text: `${room.players[0].name} is now the host.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-        room.chat.push(sysMsg);
-      }
-
-      const leaveMsg = {
-        sender: 'System',
-        text: `${leavingPlayer.name} has left the room.`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      room.chat.push(leaveMsg);
-
-      // If game was playing, reset it back to lobby because a player left
-      if (room.status === 'playing') {
-        room.status = 'lobby';
-        room.board = Array(room.gridSize * room.gridSize).fill(null);
-        room.turnIndex = 0;
-        room.winnerId = null;
-        room.winLine = null;
-        // Reset all ready states
-        room.players.forEach(p => {
-          p.isReady = false;
-        });
-        const resetMsg = {
-          sender: 'System',
-          text: 'A player disconnected. The game has returned to the lobby.',
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-        room.chat.push(resetMsg);
-      }
-
-      // Re-assign symbols and colors to preserve index orders
-      room.players.forEach((p, idx) => {
-        p.symbol = SYMBOLS[idx];
-        p.color = COLORS[idx];
-      });
-
-      io.to(currentRoomId).emit('room-update', room);
-      io.to(currentRoomId).emit('chat-update', room.chat);
+    if (leavingPlayer.reconnectTimer) {
+      clearTimeout(leavingPlayer.reconnectTimer);
     }
 
+    room.players.splice(leavingIdx, 1);
+    socket.leave(currentRoomId);
+    console.log(`Player ${leavingPlayer.name} left room: ${currentRoomId} (explicit leave)`);
+
+    cleanupRoomAfterLeave(room, leavingPlayer);
     currentRoomId = null;
-    playerIndex = -1;
   };
 
-  socket.on('leave-room', handleLeave);
-  socket.on('disconnect', handleLeave);
+  // Connection dropped (unintentional disconnect)
+  const handleDisconnect = () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const player = room.players.find(p => p.socketId === socket.id);
+    if (!player) return;
+
+    console.log(`Player ${player.name} connection dropped. Reconnection timer started.`);
+    player.isOffline = true;
+    io.to(currentRoomId).emit('room-update', room);
+
+    // Wait 25 seconds before removing player
+    player.reconnectTimer = setTimeout(() => {
+      const activeRoom = rooms.get(currentRoomId);
+      if (!activeRoom) return;
+
+      const pIdx = activeRoom.players.findIndex(p => p.id === player.id);
+      if (pIdx === -1) return;
+
+      const offlinePlayer = activeRoom.players[pIdx];
+      if (offlinePlayer.isOffline) {
+        activeRoom.players.splice(pIdx, 1);
+        console.log(`Player ${offlinePlayer.name} failed to reconnect. Removed.`);
+        cleanupRoomAfterLeave(activeRoom, offlinePlayer);
+      }
+    }, 25000);
+  };
+
+  // Shared cleanup method
+  function cleanupRoomAfterLeave(room, leavingPlayer) {
+    const rId = room.id;
+    if (room.players.length === 0) {
+      rooms.delete(rId);
+      console.log(`Room deleted (empty): ${rId}`);
+      return;
+    }
+
+    if (leavingPlayer.isHost) {
+      room.players[0].isHost = true;
+      const sysMsg = {
+        sender: 'System',
+        text: `${room.players[0].name} is now the host.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.chat.push(sysMsg);
+    }
+
+    const leaveMsg = {
+      sender: 'System',
+      text: `${leavingPlayer.name} has left the room.`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    room.chat.push(leaveMsg);
+
+    if (room.status === 'playing') {
+      room.status = 'lobby';
+      room.board = Array(room.gridSize * room.gridSize).fill(null);
+      room.turnIndex = 0;
+      room.winnerId = null;
+      room.winLine = null;
+      room.players.forEach(p => {
+        p.isReady = false;
+        if (p.reconnectTimer) {
+          clearTimeout(p.reconnectTimer);
+          delete p.reconnectTimer;
+        }
+      });
+      const resetMsg = {
+        sender: 'System',
+        text: 'A player disconnected. The game has returned to the lobby.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.chat.push(resetMsg);
+    }
+
+    room.players.forEach((p, idx) => {
+      p.symbol = SYMBOLS[idx];
+      p.color = COLORS[idx];
+    });
+
+    io.to(rId).emit('room-update', room);
+    io.to(rId).emit('chat-update', room.chat);
+  }
+
+  socket.on('leave-room', handleExplicitLeave);
+  socket.on('disconnect', handleDisconnect);
 });
 
 const PORT = process.env.PORT || 5000;
