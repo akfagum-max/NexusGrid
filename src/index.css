@@ -289,6 +289,7 @@ p {
 .welcome-logo {
   font-size: 4rem;
   margin-bottom: 12px;
+  view-transition-name: main-logo;
 }
 
 .welcome-subtitle {
@@ -708,6 +709,7 @@ p {
   padding: 12px;
   border-radius: 20px;
   display: flex;
+  view-transition-name: game-board;
   align-items: center;
   justify-content: center;
   box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.5);
@@ -718,6 +720,7 @@ p {
   width: 100%;
   height: 100%;
   gap: 8px;
+  contain: layout paint style;
 }
 
 .board-cell {
@@ -731,6 +734,8 @@ p {
   justify-content: center;
   position: relative;
   transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  contain: layout paint;
+  will-change: transform, background-color;
 }
 
 .board-cell::after {
@@ -766,6 +771,7 @@ p {
   align-items: center;
   justify-content: center;
   user-select: none;
+  will-change: transform, opacity;
 }
 
 /* Make symbols responsive to board size */

@@ -3,7 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import confetti from 'canvas-confetti';
 import { 
   Copy, Plus, Users, Play, Send, Volume2, VolumeX, LogOut, 
-  RefreshCw, AlertCircle, MessageSquare, Home
+  RefreshCw, AlertCircle, MessageSquare, Home, Share2
 } from 'lucide-react';
 import { SYMBOLS, COLORS, checkWin } from './utils/gameHelpers';
 import './App.css';
@@ -45,6 +45,9 @@ interface Toast {
   type: 'info' | 'error';
 }
 
+// Unified global AudioContext manager (Singleton Pattern to prevent memory leaks/gc spikes)
+let audioCtxSingleton: AudioContext | null = null;
+
 function App() {
   // Navigation & Mode
   const [view, setView] = useState<'welcome' | 'local-setup' | 'lobby' | 'playing' | 'ended'>('welcome');
@@ -62,6 +65,7 @@ function App() {
   // Online State
   const [roomState, setRoomState] = useState<Room | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const pendingActionRef = useRef<{ type: 'create' | 'join'; data: any } | null>(null);
   
   // Local Pass & Play State
   const [localPlayers, setLocalPlayers] = useState<Omit<Player, 'isReady' | 'isHost' | 'socketId'>[]>([]);
@@ -76,13 +80,34 @@ function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Audio synthesis helper using Web Audio API
+  // Custom View Transition Wrapper
+  const transitionToView = (nextView: 'welcome' | 'local-setup' | 'lobby' | 'playing' | 'ended') => {
+    const doc = document as any;
+    if (!doc.startViewTransition) {
+      setView(nextView);
+      return;
+    }
+    doc.startViewTransition(() => {
+      setView(nextView);
+    });
+  };
+
+  // Audio synthesis helper using Web Audio API (pre-warmed / Cached Singleton)
   const playAudio = (type: 'click' | 'place' | 'win' | 'draw' | 'join' | 'ready') => {
     if (!soundEnabled) return;
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioContextClass) return;
-      const ctx = new AudioContextClass();
+      
+      // Lazily instantiate cached audio context
+      if (!audioCtxSingleton) {
+        audioCtxSingleton = new AudioContextClass();
+      }
+      const ctx = audioCtxSingleton;
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       
@@ -140,7 +165,7 @@ function App() {
         osc.stop(now + 0.25);
       }
     } catch (e) {
-      console.warn("Audio synthesis not allowed or supported by browser", e);
+      console.warn("Audio synthesis error", e);
     }
   };
 
@@ -152,6 +177,44 @@ function App() {
     }, 4000);
   };
 
+  // Web Notification API registration on load
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
+    // Auto-parse Room ID from URL Query Params for direct share support
+    const params = new URLSearchParams(window.location.search);
+    const roomParam = params.get('room');
+    if (roomParam) {
+      setJoinRoomId(roomParam.toUpperCase());
+      setMode('online');
+      addToast(`Loaded Room Code: ${roomParam.toUpperCase()}`);
+    }
+  }, []);
+
+  // Monitor Room state turnIndex changes to trigger background alerts and vibration
+  useEffect(() => {
+    if (!roomState || roomState.status !== 'playing' || view !== 'playing') return;
+    const myPersistentId = localStorage.getItem('nexus_player_id');
+    const activePlayer = roomState.players[roomState.turnIndex];
+    
+    if (activePlayer && activePlayer.id === myPersistentId) {
+      // 1. Vibration feedback (Tactile game loop confirmation)
+      if ('vibrate' in navigator) {
+        navigator.vibrate(80);
+      }
+
+      // 2. Notification trigger (Visibility-Aware background alerts)
+      if (document.visibilityState === 'hidden' && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('Nexus Grid: Your Turn! 🌌', {
+          body: `Make your move on the board! Room: ${roomState.id}`,
+          tag: 'nexus-turn'
+        });
+      }
+    }
+  }, [roomState?.turnIndex]);
+
   // Connect socket.io during online mode setup
   useEffect(() => {
     if (mode === 'online') {
@@ -160,11 +223,17 @@ function App() {
 
       const socket = socketRef.current;
 
-      // Automatically attempt reconnect on socket connection if stored credentials match
       socket.on('connect', () => {
         const savedPlayerId = localStorage.getItem('nexus_player_id');
         const savedRId = localStorage.getItem('nexus_room_id');
-        if (savedPlayerId && savedRId) {
+        
+        // Execute pending create/join actions if they were queued
+        if (pendingActionRef.current) {
+          const { type, data } = pendingActionRef.current;
+          socket.emit(type === 'create' ? 'create-room' : 'join-room', data);
+          pendingActionRef.current = null;
+        } else if (savedPlayerId && savedRId) {
+          // Fallback to active session reconnection
           socket.emit('reconnect-player', { playerId: savedPlayerId, roomId: savedRId });
         }
       });
@@ -172,7 +241,7 @@ function App() {
       socket.on('connect_error', () => {
         addToast('Connection error. Is the server running?', 'error');
         setMode(null);
-        setView('welcome');
+        transitionToView('welcome');
       });
 
       socket.on('error-msg', (msg: string) => {
@@ -181,7 +250,7 @@ function App() {
 
       socket.on('room-created', ({ room, playerId }: { room: Room, playerId: string }) => {
         setRoomState(room);
-        setView('lobby');
+        transitionToView('lobby');
         playAudio('join');
         localStorage.setItem('nexus_player_id', playerId);
         localStorage.setItem('nexus_room_id', room.id);
@@ -191,7 +260,7 @@ function App() {
 
       socket.on('room-joined', ({ room, playerId }: { room: Room, playerId: string }) => {
         setRoomState(room);
-        setView('lobby');
+        transitionToView('lobby');
         playAudio('join');
         localStorage.setItem('nexus_player_id', playerId);
         localStorage.setItem('nexus_room_id', room.id);
@@ -202,11 +271,11 @@ function App() {
       socket.on('room-reconnected', (room: Room) => {
         setRoomState(room);
         if (room.status === 'playing') {
-          setView('playing');
+          transitionToView('playing');
         } else if (room.status === 'ended') {
-          setView('ended');
+          transitionToView('ended');
         } else {
-          setView('lobby');
+          transitionToView('lobby');
         }
         addToast('Reconnected to session!');
         playAudio('join');
@@ -219,23 +288,26 @@ function App() {
         setSavedRoomId(null);
         setRoomState(null);
         setMode(null);
-        setView('welcome');
+        transitionToView('welcome');
       });
 
       socket.on('room-update', (room: Room) => {
         setRoomState(room);
         if (room.status === 'playing') {
-          setView('playing');
+          transitionToView('playing');
         } else if (room.status === 'ended') {
-          setView('ended');
+          transitionToView('ended');
           if (room.winnerId === 'draw') {
             playAudio('draw');
           } else {
             playAudio('win');
             triggerConfetti();
+            if ('vibrate' in navigator) {
+              navigator.vibrate([100, 50, 100]);
+            }
           }
         } else if (room.status === 'lobby') {
-          setView('lobby');
+          transitionToView('lobby');
         }
       });
 
@@ -246,6 +318,7 @@ function App() {
       return () => {
         socket.disconnect();
         socketRef.current = null;
+        pendingActionRef.current = null;
       };
     }
   }, [mode]);
@@ -266,6 +339,14 @@ function App() {
     });
   };
 
+  // Speculative connection warming on tab hover
+  const warmSocketConnection = () => {
+    if (!socketRef.current) {
+      playAudio('click'); // Pre-trigger AudioContext validation
+      setMode('online');
+    }
+  };
+
   // --- ONLINE GAME ACTIONS ---
   const handleCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
@@ -275,14 +356,18 @@ function App() {
     }
     playAudio('click');
     setMode('online');
-    setTimeout(() => {
-      if (socketRef.current) {
-        socketRef.current.emit('create-room', { 
-          playerName: playerName.trim(), 
-          maxPlayers 
-        });
-      }
-    }, 200);
+    
+    // Clear stale session
+    localStorage.removeItem('nexus_room_id');
+    localStorage.removeItem('nexus_player_id');
+    setSavedRoomId(null);
+    
+    const actionData = { playerName: playerName.trim(), maxPlayers };
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('create-room', actionData);
+    } else {
+      pendingActionRef.current = { type: 'create', data: actionData };
+    }
   };
 
   const handleJoinRoom = (e: React.FormEvent) => {
@@ -297,14 +382,18 @@ function App() {
     }
     playAudio('click');
     setMode('online');
-    setTimeout(() => {
-      if (socketRef.current) {
-        socketRef.current.emit('join-room', {
-          playerName: playerName.trim(),
-          roomId: joinRoomId.trim().toUpperCase()
-        });
-      }
-    }, 200);
+    
+    // Clear stale session
+    localStorage.removeItem('nexus_room_id');
+    localStorage.removeItem('nexus_player_id');
+    setSavedRoomId(null);
+    
+    const actionData = { playerName: playerName.trim(), roomId: joinRoomId.trim().toUpperCase() };
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('join-room', actionData);
+    } else {
+      pendingActionRef.current = { type: 'join', data: actionData };
+    }
   };
 
   const handleToggleReady = () => {
@@ -337,6 +426,10 @@ function App() {
     if (roomState.board[cellIndex] !== null) return;
 
     playAudio('place');
+    if ('vibrate' in navigator) {
+      navigator.vibrate(50);
+    }
+
     if (socketRef.current) {
       socketRef.current.emit('make-move', { cellIndex });
     }
@@ -369,10 +462,10 @@ function App() {
     setSavedRoomId(null);
     setRoomState(null);
     setMode(null);
-    setView('welcome');
+    transitionToView('welcome');
   };
 
-  // Auto Reconnection triggers
+  // Reconnection action handlers
   const handleAutoReconnect = () => {
     playAudio('click');
     setMode('online');
@@ -383,6 +476,22 @@ function App() {
     localStorage.removeItem('nexus_room_id');
     localStorage.removeItem('nexus_player_id');
     setSavedRoomId(null);
+  };
+
+  // One-tap web sharing API trigger
+  const handleShareRoom = () => {
+    playAudio('click');
+    const shareUrl = `${window.location.origin}?room=${roomState?.id}`;
+    if (navigator.share) {
+      navigator.share({
+        title: 'Nexus Grid Game Room',
+        text: `Join my room code ${roomState?.id} to play dynamic Tic-Tac-Toe!`,
+        url: shareUrl
+      }).catch(err => console.log('Web share failed:', err));
+    } else {
+      navigator.clipboard.writeText(shareUrl);
+      addToast('Invite link copied to clipboard!');
+    }
   };
 
   // --- LOCAL GAME (PASS & PLAY) ACTIONS ---
@@ -410,13 +519,17 @@ function App() {
     setLocalTurnIndex(0);
     setLocalWinner(null);
     setLocalWinLine(null);
-    setView('playing');
+    transitionToView('playing');
   };
 
   const handleLocalMove = (cellIndex: number) => {
     if (localWinner || localBoard[cellIndex] !== null) return;
 
     playAudio('place');
+    if ('vibrate' in navigator) {
+      navigator.vibrate(50);
+    }
+
     const newBoard = [...localBoard];
     const activePlayer = localPlayers[localTurnIndex];
     newBoard[cellIndex] = activePlayer.symbol;
@@ -427,15 +540,18 @@ function App() {
     if (winLine) {
       setLocalWinner(activePlayer.name);
       setLocalWinLine(winLine);
-      setView('ended');
+      transitionToView('ended');
       playAudio('win');
       triggerConfetti();
+      if ('vibrate' in navigator) {
+        navigator.vibrate([100, 50, 100]);
+      }
     } else {
       // Check Draw
       const isDraw = newBoard.every(cell => cell !== null);
       if (isDraw) {
         setLocalWinner('draw');
-        setView('ended');
+        transitionToView('ended');
         playAudio('draw');
       } else {
         // Next Turn
@@ -450,7 +566,7 @@ function App() {
     setLocalTurnIndex(0);
     setLocalWinner(null);
     setLocalWinLine(null);
-    setView('playing');
+    transitionToView('playing');
   };
 
   const handleExitLocalGame = () => {
@@ -461,7 +577,7 @@ function App() {
     setLocalWinner(null);
     setLocalWinLine(null);
     setMode(null);
-    setView('welcome');
+    transitionToView('welcome');
   };
 
   return (
@@ -544,6 +660,7 @@ function App() {
                 type="button" 
                 className={`tab-btn ${mode === 'online' ? 'active' : ''}`}
                 onClick={() => { playAudio('click'); setMode('online'); }}
+                onPointerOver={warmSocketConnection}
                 role="tab"
                 aria-selected={mode === 'online'}
               >
@@ -588,7 +705,7 @@ function App() {
                   type="button" 
                   className="btn btn-primary" 
                   style={{ width: '100%', marginTop: '24px' }}
-                  onClick={() => { playAudio('click'); setView('local-setup'); }}
+                  onClick={() => { playAudio('click'); transitionToView('local-setup'); }}
                 >
                   Configure Players & Start
                 </button>
@@ -699,7 +816,7 @@ function App() {
                 id="btn-back-setup"
                 type="button" 
                 className="btn btn-outline" 
-                onClick={() => { playAudio('click'); setView('welcome'); }}
+                onClick={() => { playAudio('click'); transitionToView('welcome'); }}
               >
                 Back
               </button>
@@ -725,18 +842,28 @@ function App() {
               
               <div className="room-id-box">
                 <code>{roomState.id}</code>
-                <button 
-                  id="btn-copy-code"
-                  className="copy-btn" 
-                  onClick={() => {
-                    navigator.clipboard.writeText(roomState.id);
-                    addToast('Room Code copied to clipboard!');
-                    playAudio('click');
-                  }}
-                  title="Copy room code"
-                >
-                  <Copy size={20} />
-                </button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button 
+                    id="btn-copy-code"
+                    className="copy-btn" 
+                    onClick={() => {
+                      navigator.clipboard.writeText(roomState.id);
+                      addToast('Room Code copied to clipboard!');
+                      playAudio('click');
+                    }}
+                    title="Copy room code"
+                  >
+                    <Copy size={20} />
+                  </button>
+                  <button 
+                    id="btn-share-code"
+                    className="copy-btn" 
+                    onClick={handleShareRoom}
+                    title="Share Room Invite"
+                  >
+                    <Share2 size={20} />
+                  </button>
+                </div>
               </div>
             </div>
 

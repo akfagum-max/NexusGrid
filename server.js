@@ -56,7 +56,6 @@ const COLORS = [
 
 // Helper to check for a win
 function checkWin(board, size, symbol) {
-  // size = N + 1
   // Row check
   for (let r = 0; r < size; r++) {
     let win = true;
@@ -119,8 +118,118 @@ function checkWin(board, size, symbol) {
 io.on('connection', (socket) => {
   let currentRoomId = null;
 
+  // Shared cleanup method
+  function cleanupRoomAfterLeave(room, leavingPlayer) {
+    const rId = room.id;
+    if (room.players.length === 0) {
+      rooms.delete(rId);
+      console.log(`Room deleted (empty): ${rId}`);
+      return;
+    }
+
+    if (leavingPlayer.isHost) {
+      room.players[0].isHost = true;
+      const sysMsg = {
+        sender: 'System',
+        text: `${room.players[0].name} is now the host.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.chat.push(sysMsg);
+    }
+
+    const leaveMsg = {
+      sender: 'System',
+      text: `${leavingPlayer.name} has left the room.`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    room.chat.push(leaveMsg);
+
+    if (room.status === 'playing') {
+      room.status = 'lobby';
+      room.board = Array(room.gridSize * room.gridSize).fill(null);
+      room.turnIndex = 0;
+      room.winnerId = null;
+      room.winLine = null;
+      
+      // Reset only local ready states. Do NOT clear other players' active reconnect timers.
+      room.players.forEach(p => {
+        p.isReady = false;
+      });
+      
+      const resetMsg = {
+        sender: 'System',
+        text: 'A player disconnected. The game has returned to the lobby.',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.chat.push(resetMsg);
+    }
+
+    room.players.forEach((p, idx) => {
+      p.symbol = SYMBOLS[idx];
+      p.color = COLORS[idx];
+    });
+
+    io.to(rId).emit('room-update', room);
+    io.to(rId).emit('chat-update', room.chat);
+  }
+
+  // Explicit leave
+  const handleExplicitLeave = () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const leavingIdx = room.players.findIndex(p => p.socketId === socket.id);
+    if (leavingIdx === -1) return;
+
+    const leavingPlayer = room.players[leavingIdx];
+    
+    if (leavingPlayer.reconnectTimer) {
+      clearTimeout(leavingPlayer.reconnectTimer);
+    }
+
+    room.players.splice(leavingIdx, 1);
+    socket.leave(currentRoomId);
+    console.log(`Player ${leavingPlayer.name} left room: ${currentRoomId} (explicit leave)`);
+
+    cleanupRoomAfterLeave(room, leavingPlayer);
+    currentRoomId = null;
+  };
+
+  // Connection dropped (unintentional disconnect)
+  const handleDisconnect = () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    const player = room.players.find(p => p.socketId === socket.id);
+    if (!player) return;
+
+    console.log(`Player ${player.name} connection dropped. Reconnection timer started.`);
+    player.isOffline = true;
+    io.to(currentRoomId).emit('room-update', room);
+
+    // Wait 25 seconds before removing player
+    player.reconnectTimer = setTimeout(() => {
+      const activeRoom = rooms.get(currentRoomId);
+      if (!activeRoom) return;
+
+      const pIdx = activeRoom.players.findIndex(p => p.id === player.id);
+      if (pIdx === -1) return;
+
+      const offlinePlayer = activeRoom.players[pIdx];
+      if (offlinePlayer.isOffline) {
+        activeRoom.players.splice(pIdx, 1);
+        console.log(`Player ${offlinePlayer.name} failed to reconnect. Removed.`);
+        cleanupRoomAfterLeave(activeRoom, offlinePlayer);
+      }
+    }, 25000);
+  };
+
   // 1. Create Room
   socket.on('create-room', ({ playerName, maxPlayers }) => {
+    handleExplicitLeave(); // Prevent ghost player leak from previous room
+    
     const numPlayers = parseInt(maxPlayers, 10);
     if (isNaN(numPlayers) || numPlayers < 2 || numPlayers > 6) {
       socket.emit('error-msg', 'Invalid number of players (must be 2-6).');
@@ -163,6 +272,8 @@ io.on('connection', (socket) => {
 
   // 2. Join Room
   socket.on('join-room', ({ playerName, roomId }) => {
+    handleExplicitLeave(); // Prevent ghost player leak from previous room
+    
     const rId = roomId.trim().toUpperCase();
     const room = rooms.get(rId);
 
@@ -214,6 +325,8 @@ io.on('connection', (socket) => {
 
   // Reconnect Player
   socket.on('reconnect-player', ({ playerId, roomId }) => {
+    handleExplicitLeave(); // Prevent ghost player leak from previous room
+    
     if (!playerId || !roomId) return;
     const rId = roomId.trim().toUpperCase();
     const room = rooms.get(rId);
@@ -437,115 +550,6 @@ io.on('connection', (socket) => {
     
     console.log(`Game restarted in room: ${currentRoomId}`);
   });
-
-  // Explicit leave
-  const handleExplicitLeave = () => {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
-    if (!room) return;
-
-    const leavingIdx = room.players.findIndex(p => p.socketId === socket.id);
-    if (leavingIdx === -1) return;
-
-    const leavingPlayer = room.players[leavingIdx];
-    
-    if (leavingPlayer.reconnectTimer) {
-      clearTimeout(leavingPlayer.reconnectTimer);
-    }
-
-    room.players.splice(leavingIdx, 1);
-    socket.leave(currentRoomId);
-    console.log(`Player ${leavingPlayer.name} left room: ${currentRoomId} (explicit leave)`);
-
-    cleanupRoomAfterLeave(room, leavingPlayer);
-    currentRoomId = null;
-  };
-
-  // Connection dropped (unintentional disconnect)
-  const handleDisconnect = () => {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
-    if (!room) return;
-
-    const player = room.players.find(p => p.socketId === socket.id);
-    if (!player) return;
-
-    console.log(`Player ${player.name} connection dropped. Reconnection timer started.`);
-    player.isOffline = true;
-    io.to(currentRoomId).emit('room-update', room);
-
-    // Wait 25 seconds before removing player
-    player.reconnectTimer = setTimeout(() => {
-      const activeRoom = rooms.get(currentRoomId);
-      if (!activeRoom) return;
-
-      const pIdx = activeRoom.players.findIndex(p => p.id === player.id);
-      if (pIdx === -1) return;
-
-      const offlinePlayer = activeRoom.players[pIdx];
-      if (offlinePlayer.isOffline) {
-        activeRoom.players.splice(pIdx, 1);
-        console.log(`Player ${offlinePlayer.name} failed to reconnect. Removed.`);
-        cleanupRoomAfterLeave(activeRoom, offlinePlayer);
-      }
-    }, 25000);
-  };
-
-  // Shared cleanup method
-  function cleanupRoomAfterLeave(room, leavingPlayer) {
-    const rId = room.id;
-    if (room.players.length === 0) {
-      rooms.delete(rId);
-      console.log(`Room deleted (empty): ${rId}`);
-      return;
-    }
-
-    if (leavingPlayer.isHost) {
-      room.players[0].isHost = true;
-      const sysMsg = {
-        sender: 'System',
-        text: `${room.players[0].name} is now the host.`,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      room.chat.push(sysMsg);
-    }
-
-    const leaveMsg = {
-      sender: 'System',
-      text: `${leavingPlayer.name} has left the room.`,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-    room.chat.push(leaveMsg);
-
-    if (room.status === 'playing') {
-      room.status = 'lobby';
-      room.board = Array(room.gridSize * room.gridSize).fill(null);
-      room.turnIndex = 0;
-      room.winnerId = null;
-      room.winLine = null;
-      room.players.forEach(p => {
-        p.isReady = false;
-        if (p.reconnectTimer) {
-          clearTimeout(p.reconnectTimer);
-          delete p.reconnectTimer;
-        }
-      });
-      const resetMsg = {
-        sender: 'System',
-        text: 'A player disconnected. The game has returned to the lobby.',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      room.chat.push(resetMsg);
-    }
-
-    room.players.forEach((p, idx) => {
-      p.symbol = SYMBOLS[idx];
-      p.color = COLORS[idx];
-    });
-
-    io.to(rId).emit('room-update', room);
-    io.to(rId).emit('chat-update', room.chat);
-  }
 
   socket.on('leave-room', handleExplicitLeave);
   socket.on('disconnect', handleDisconnect);
