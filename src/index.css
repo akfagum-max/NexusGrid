@@ -312,7 +312,7 @@ p {
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  padding: 10px;
+  padding: 12px 10px;
   font-family: var(--sans);
   font-weight: 600;
   font-size: 0.95rem;
@@ -406,8 +406,11 @@ p {
   border: none;
   color: var(--text-secondary);
   cursor: pointer;
-  display: flex;
-  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
   border-radius: 6px;
   transition: all 0.2s ease;
 }
@@ -467,6 +470,10 @@ p {
   font-weight: 600;
   font-size: 1.05rem;
   color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
 }
 
 .player-role {
@@ -616,12 +623,13 @@ p {
   background: transparent;
   border: 1px solid var(--border-glow);
   color: #fff;
-  padding: 10px;
   border-radius: 10px;
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   transition: all 0.2s ease;
 }
 
@@ -917,4 +925,101 @@ p {
 
 .info-toast {
   border-left-color: var(--neon-blue);
+}
+
+/* ==========================================================================
+   MOBILE UX AUDITOR FIXES (For viewport widths <= 480px)
+   ========================================================================== */
+
+@media (max-width: 480px) {
+  /* Reduce padding on root container */
+  #root {
+    padding: 12px;
+  }
+
+  /* Compact padding for panels */
+  .welcome-container {
+    padding: 20px;
+  }
+  .lobby-container {
+    padding: 16px;
+    gap: 16px;
+  }
+  .game-container {
+    padding: 12px;
+    gap: 16px;
+  }
+
+  /* Scaled typography */
+  h1 {
+    font-size: 2.2rem;
+  }
+  h2 {
+    font-size: 1.5rem;
+  }
+  .welcome-logo {
+    font-size: 3rem;
+    margin-bottom: 8px;
+  }
+
+  /* Sound icon positioning */
+  #toggle-sound-btn {
+    top: 12px !important;
+    right: 12px !important;
+  }
+
+  /* Column layout for status banner to prevent overlaps */
+  .status-banner {
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    align-items: center;
+    text-align: center;
+  }
+
+  /* Game board spacing optimizations */
+  .board-wrapper {
+    padding: 8px;
+    border-radius: 12px;
+  }
+  .board-grid {
+    gap: 4px;
+  }
+
+  /* High-order grid cell font scaling */
+  .grid-3x3 .symbol-wrapper { font-size: 2rem; }
+  .grid-4x4 .symbol-wrapper { font-size: 1.7rem; }
+  .grid-5x5 .symbol-wrapper { font-size: 1.4rem; }
+  .grid-6x6 .symbol-wrapper { font-size: 1.2rem; }
+  .grid-7x7 .symbol-wrapper { font-size: 1rem; }
+
+  /* Player cards list styling */
+  .player-card {
+    padding: 10px 12px;
+  }
+  .player-info {
+    gap: 10px;
+  }
+
+  /* Shrink chat size to prevent page bloating */
+  .chat-container {
+    height: 280px;
+  }
+
+  /* Center toasts at the bottom of the viewport */
+  .toast-container {
+    bottom: 16px;
+    right: 16px;
+    left: 16px;
+    align-items: center;
+  }
+  .toast {
+    width: 100%;
+    max-width: 320px;
+  }
+
+  /* Touch targets for local setups */
+  .local-player-row input {
+    padding: 10px 12px;
+  }
 }
